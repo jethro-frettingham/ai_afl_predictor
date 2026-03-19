@@ -18,7 +18,7 @@ LAYER_DIR="$BUILD_DIR/layer/python"
 mkdir -p "$LAYER_DIR"
 
 # Note: no tweepy needed - Discord uses plain HTTP webhooks via requests
-pip install \
+pip3 install \
   anthropic \
   requests \
   --target "$LAYER_DIR" \
