@@ -33,7 +33,6 @@ WEBHOOK_KEY = "discord_predictions_webhook"
 
 
 def call_claude(home: str, away: str, venue: str, year: int, round_num: int) -> dict:
-    """Ask Claude to predict a single match. Returns structured prediction dict."""
     secrets = get_secrets()
     client = anthropic.Anthropic(api_key=secrets["anthropic_api_key"])
 
@@ -49,12 +48,21 @@ Match details:
 Consider: home ground advantage, recent form, head-to-head history, key players,
 known injuries or suspensions, and playing conditions.
 
+For the confidence score, use the FULL range realistically:
+- 55-60% = genuine coin flip, very even match
+- 61-70% = slight lean, could go either way
+- 71-80% = clear favourite but upset very possible
+- 81-90% = strong favourite, would be a big surprise if they lost
+- 91-99% = massive mismatch, one team is clearly far superior right now
+DO NOT default to 65-70% for every match. A top-4 team hosting a bottom-4 team
+should be 80-90%+. A genuine 50/50 derby should be 55-58%.
+
 Respond ONLY with valid JSON (no markdown, no backticks, no preamble):
 {{
   "winner": "exact team name as given above",
-  "confidence": 72,
+  "confidence": 84,
   "margin_estimate": "by 15-25 points",
-  "reasoning": "2-3 sentence explanation of why this team wins"
+  "reasoning": "2-3 sentence explanation referencing specific reasons like ladder position, home ground, recent form or head-to-head"
 }}"""
 
     message = client.messages.create(
@@ -65,7 +73,6 @@ Respond ONLY with valid JSON (no markdown, no backticks, no preamble):
 
     raw = message.content[0].text.strip().replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
-
 
 def lambda_handler(event, context):
     """Entry point - triggered by EventBridge on Thursday morning AEST."""
@@ -132,7 +139,8 @@ def lambda_handler(event, context):
             time.sleep(0.5)
 
         except Exception as e:
-            logger.error("Failed to predict %s vs %s: %s", home, away, e)
+            import traceback
+            logger.error("Failed to predict %s vs %s: %s\n%s", home, away, e, traceback.format_exc())
             post_plain(WEBHOOK_KEY, f"**{home} vs {away}** - prediction unavailable this week.")
 
     # Save all to DynamoDB
