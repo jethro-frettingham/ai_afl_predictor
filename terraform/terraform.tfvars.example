@@ -1,0 +1,34 @@
+# terraform.tfvars
+# Copy this file to terraform.tfvars and fill in your real values.
+# NEVER commit terraform.tfvars to git - it is in .gitignore.
+
+aws_region  = "ap-southeast-2"
+environment = "prod"
+
+# ── Anthropic ──────────────────────────────────────────────────────────────────
+# https://console.anthropic.com/settings/keys
+anthropic_api_key = "sk-ant-..."
+
+# ── Discord webhooks ───────────────────────────────────────────────────────────
+# In your Discord server:
+#   1. Go to channel Settings > Integrations > Webhooks > New Webhook
+#   2. Name it (e.g. "AFL Predictor Bot"), copy the webhook URL
+#   3. Repeat for a second channel if you want predictions and results separated
+#
+# You can use the same webhook URL for both if you want one channel.
+discord_predictions_webhook = "https://discord.com/api/webhooks/..."
+discord_results_webhook     = "https://discord.com/api/webhooks/..."
+
+# ── AFL API ────────────────────────────────────────────────────────────────────
+# Squiggle is free - no API key required
+afl_api_base_url = "https://api.squiggle.com.au"
+
+# ── Schedules (UTC cron) ───────────────────────────────────────────────────────
+# Thursday 11pm UTC  = Friday 9am AEST  (predictions)
+predict_cron = "cron(0 23 ? * THU *)"
+# Monday 11pm UTC    = Tuesday 9am AEST (results)
+results_cron = "cron(0 23 ? * MON *)"
+
+# ── Lambda tuning ──────────────────────────────────────────────────────────────
+lambda_memory_mb       = 256
+lambda_timeout_seconds = 120
