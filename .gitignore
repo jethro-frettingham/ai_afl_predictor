@@ -7,3 +7,5 @@ terraform.tfstate.backup
 *.tfvars.json
 *.tfstate
 *.tfstate.backup
+.build/
+/Users/jethrofrettingham/ai_afl_predictor/build/*

@@ -243,3 +243,138 @@ def build_result_embed(
             {"name": "🤖 Our pick","value": pred_text, "inline": True},
         ],
     }
+
+
+# ── Live form + player data ────────────────────────────────────────────────────
+def get_team_form(team: str, year: int, current_round: int) -> dict:
+    """
+    Fetch a team's last 5 completed results from Squiggle.
+    Returns a dict with wins, losses, avg score for/against, and result strings.
+    """
+    secrets = get_secrets()
+    base_url = secrets.get("afl_api_base_url", "https://api.squiggle.com.au")
+    headers = {"User-Agent": "afl-predictor-bot/1.0"}
+
+    # Fetch last 5 completed games for this team this season
+    url = f"{base_url}/?q=games;year={year};team={requests.utils.quote(team)};complete=100"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        games = resp.json().get("games", [])
+    except Exception as e:
+        logger.warning("Could not fetch form for %s: %s", team, e)
+        return {}
+
+    # Sort by round descending, take last 5
+    games = sorted(games, key=lambda g: int(g.get("round", 0)), reverse=True)
+    recent = games[:5]
+
+    if not recent:
+        return {}
+
+    results = []
+    scores_for = []
+    scores_against = []
+
+    for g in recent:
+        is_home = g.get("hteam") == team
+        team_score = int(g.get("hscore") or 0) if is_home else int(g.get("ascore") or 0)
+        opp_score  = int(g.get("ascore") or 0) if is_home else int(g.get("hscore") or 0)
+        opponent   = g.get("ateam") if is_home else g.get("hteam")
+        won = team_score > opp_score
+        results.append(f"R{g['round']} {'W' if won else 'L'} vs {opponent} ({team_score}-{opp_score})")
+        scores_for.append(team_score)
+        scores_against.append(opp_score)
+
+    wins = sum(1 for r in results if " W " in r)
+
+    return {
+        "wins_last_5": wins,
+        "losses_last_5": len(results) - wins,
+        "avg_score_for": round(sum(scores_for) / len(scores_for), 1) if scores_for else 0,
+        "avg_score_against": round(sum(scores_against) / len(scores_against), 1) if scores_against else 0,
+        "last_5_results": results,
+    }
+
+
+def get_top_players(team: str, year: int) -> list[dict]:
+    """
+    Fetch top 5 players by total score from Squiggle player stats.
+    Returns list of dicts with name, games, avg_score.
+    """
+    secrets = get_secrets()
+    base_url = secrets.get("afl_api_base_url", "https://api.squiggle.com.au")
+    headers = {"User-Agent": "afl-predictor-bot/1.0"}
+
+    url = f"{base_url}/?q=playerstats;year={year};team={requests.utils.quote(team)}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        players = resp.json().get("playerstats", [])
+    except Exception as e:
+        logger.warning("Could not fetch player stats for %s: %s", team, e)
+        return []
+
+    if not players:
+        return []
+
+    # Aggregate by player name
+    player_totals: dict = {}
+    for p in players:
+        name = p.get("player_name") or p.get("name", "Unknown")
+        score = float(p.get("score") or p.get("sc") or 0)
+        games = int(p.get("games") or 1)
+        if name not in player_totals:
+            player_totals[name] = {"name": name, "total": 0, "games": 0}
+        player_totals[name]["total"] += score
+        player_totals[name]["games"] = max(player_totals[name]["games"], games)
+
+    # Sort by avg score, return top 5
+    ranked = sorted(
+        player_totals.values(),
+        key=lambda p: p["total"] / max(p["games"], 1),
+        reverse=True,
+    )[:5]
+
+    return [
+        {
+            "name": r["name"],
+            "games": r["games"],
+            "avg_score": round(r["total"] / max(r["games"], 1), 1),
+        }
+        for r in ranked
+    ]
+
+
+def get_head_to_head(home: str, away: str, year: int) -> list[str]:
+    """
+    Fetch the last 5 head-to-head results between two teams.
+    """
+    secrets = get_secrets()
+    base_url = secrets.get("afl_api_base_url", "https://api.squiggle.com.au")
+    headers = {"User-Agent": "afl-predictor-bot/1.0"}
+
+    url = (
+        f"{base_url}/?q=games;team={requests.utils.quote(home)}"
+        f";vsTeam={requests.utils.quote(away)};complete=100"
+    )
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        games = resp.json().get("games", [])
+    except Exception as e:
+        logger.warning("Could not fetch H2H for %s vs %s: %s", home, away, e)
+        return []
+
+    games = sorted(games, key=lambda g: (int(g.get("year", 0)), int(g.get("round", 0))), reverse=True)[:5]
+
+    results = []
+    for g in games:
+        hscore = int(g.get("hscore") or 0)
+        ascore = int(g.get("ascore") or 0)
+        winner = g.get("hteam") if hscore > ascore else g.get("ateam")
+        results.append(
+            f"{g.get('year')} R{g.get('round')}: {g.get('hteam')} {hscore} - {ascore} {g.get('ateam')} ({winner} won)"
+        )
+
+    return results

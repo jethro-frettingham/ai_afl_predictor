@@ -3,9 +3,10 @@ predict_matches/handler.py
 
 Runs Thursday morning AEST via EventBridge.
 1. Fetches upcoming AFL fixtures from Squiggle API
-2. Calls Claude to predict each match
-3. Posts rich embeds to Discord #predictions channel
-4. Saves predictions to DynamoDB
+2. Fetches live form, player stats, and H2H for each match
+3. Calls Claude with real data to predict each match
+4. Posts rich embeds to Discord #predictions channel
+5. Saves predictions to DynamoDB
 """
 import json
 import logging
@@ -20,6 +21,9 @@ from utils import (
     get_secrets,
     get_upcoming_games,
     get_current_round,
+    get_team_form,
+    get_top_players,
+    get_head_to_head,
     save_prediction,
     post_embed,
     post_plain,
@@ -32,34 +36,89 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 WEBHOOK_KEY = "discord_predictions_webhook"
 
 
-def call_claude(home: str, away: str, venue: str, year: int, round_num: int) -> dict:
-    """Ask Claude to predict a single match. Returns structured prediction dict."""
+def format_form(form: dict, team: str) -> str:
+    """Format team form data into a readable string for the prompt."""
+    if not form:
+        return f"{team}: no form data available"
+    results_str = ", ".join(form.get("last_5_results", []))
+    return (
+        f"{team}: {form['wins_last_5']}W-{form['losses_last_5']}L last 5 games | "
+        f"Avg score: {form['avg_score_for']} for, {form['avg_score_against']} against | "
+        f"Results: {results_str}"
+    )
+
+
+def format_players(players: list[dict], team: str) -> str:
+    """Format top player stats into a readable string for the prompt."""
+    if not players:
+        return f"{team}: no player data available"
+    player_lines = ", ".join(
+        f"{p['name']} (avg {p['avg_score']} SC, {p['games']} games)"
+        for p in players
+    )
+    return f"{team} top players: {player_lines}"
+
+
+def call_claude(
+    home: str,
+    away: str,
+    venue: str,
+    year: int,
+    round_num: int,
+    home_form: dict,
+    away_form: dict,
+    home_players: list[dict],
+    away_players: list[dict],
+    h2h: list[str],
+) -> dict:
+    """Ask Claude to predict a match using live form + player data."""
     secrets = get_secrets()
     client = anthropic.Anthropic(api_key=secrets["anthropic_api_key"])
 
-    prompt = f"""You are an expert AFL analyst with deep knowledge of Australian Rules Football.
-Predict the winner of this AFL match and explain your reasoning concisely.
+    h2h_str = "\n".join(h2h) if h2h else "No recent head-to-head data available"
 
-Match details:
-- Home team: {home}
-- Away team: {away}
-- Venue: {venue}
-- Season: {year}, Round {round_num}
+    prompt = f"""You are an expert AFL analyst. Predict the winner of this match using the live data provided below.
 
-Consider: home ground advantage, recent form, head-to-head history, key players,
-known injuries or suspensions, and playing conditions.
+MATCH: {home} (home) vs {away} (away)
+VENUE: {venue}
+SEASON: {year}, Round {round_num}
+
+RECENT FORM (last 5 games):
+{format_form(home_form, home)}
+{format_form(away_form, away)}
+
+TOP PLAYERS BY FANTASY SCORE:
+{format_players(home_players, home)}
+{format_players(away_players, away)}
+
+HEAD-TO-HEAD (recent):
+{h2h_str}
+
+Use ALL of the above data in your reasoning. Specifically call out:
+- Which team is in better form and by how much
+- Any standout players likely to influence the result
+- What the H2H history suggests
+- How much home ground advantage matters at {venue}
+
+For confidence, use the FULL range based on the actual data:
+- 55-60% = genuinely even, form and H2H are close
+- 61-70% = slight lean based on one or two factors
+- 71-80% = clear favourite based on form or H2H
+- 81-90% = dominant form advantage or big H2H edge
+- 91-99% = one team is significantly better across all metrics right now
+DO NOT default to 65-70%. Let the data drive the number.
 
 Respond ONLY with valid JSON (no markdown, no backticks, no preamble):
 {{
   "winner": "exact team name as given above",
-  "confidence": 72,
+  "confidence": 84,
   "margin_estimate": "by 15-25 points",
-  "reasoning": "2-3 sentence explanation of why this team wins"
+  "reasoning": "3 sentence explanation that references the actual form, player, or H2H data above"
 }}"""
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=512,
+        max_tokens=600,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -70,12 +129,14 @@ Respond ONLY with valid JSON (no markdown, no backticks, no preamble):
 def lambda_handler(event, context):
     """Entry point - triggered by EventBridge on Thursday morning AEST."""
     now = datetime.now(timezone.utc)
-    year = now.year
+    year      = event.get("year_override") or now.year
+    round_num = event.get("round_override") or None
 
     logger.info("Starting prediction run - %s", now.isoformat())
 
     try:
-        round_num = get_current_round(year)
+        if not round_num:
+            round_num = get_current_round(year)
         logger.info("Predicting year=%s round=%s", year, round_num)
     except Exception as e:
         logger.error("Failed to determine current round: %s", e)
@@ -97,12 +158,12 @@ def lambda_handler(event, context):
         embed={
             "title": f":football: AFL {year} - Round {round_num} Predictions",
             "description": (
-                "The AI analyst has studied the tape, checked the stats, and "
-                "consulted the football gods. Here's how this week is going to go...\n\n"
+                "The AI analyst has studied the form guide, crunched the player stats, "
+                "and checked the head-to-head records. Here's how this week is going to go...\n\n"
                 f"**{len(games)} matches** - predictions below"
             ),
             "color": COLOUR_GOLD,
-            "footer": {"text": "Results recap drops Monday morning"},
+            "footer": {"text": "Powered by live form + player data | Results recap drops Monday"},
         },
     )
 
@@ -119,7 +180,28 @@ def lambda_handler(event, context):
             continue
 
         try:
-            prediction = call_claude(home, away, venue, year, round_num)
+            # Fetch live data for both teams in parallel-ish
+            logger.info("Fetching live data for %s vs %s", home, away)
+            home_form    = get_team_form(home, year, round_num)
+            away_form    = get_team_form(away, year, round_num)
+            home_players = get_top_players(home, year)
+            away_players = get_top_players(away, year)
+            h2h          = get_head_to_head(home, away, year)
+
+            logger.info(
+                "Data fetched - home form: %s, away form: %s, H2H: %d games",
+                f"{home_form.get('wins_last_5', '?')}W" if home_form else "none",
+                f"{away_form.get('wins_last_5', '?')}W" if away_form else "none",
+                len(h2h),
+            )
+
+            prediction = call_claude(
+                home, away, venue, year, round_num,
+                home_form, away_form,
+                home_players, away_players,
+                h2h,
+            )
+
             logger.info(
                 "Predicted %s vs %s -> %s (%d%%)",
                 home, away, prediction["winner"], prediction["confidence"],
